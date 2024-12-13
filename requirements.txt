@@ -1,0 +1,5 @@
+psutil==6.1.0
+pywin32==308
+speedtest_cli==2.1.3
+tkcalendar==1.6.1
+win32security==2.1.0
