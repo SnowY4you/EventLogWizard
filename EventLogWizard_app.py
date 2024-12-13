@@ -124,6 +124,18 @@ def create_gui():
     remote_machine = tk.Entry(remote_frame, state=tk.DISABLED)
     remote_machine.pack(side=tk.LEFT, padx=5)
 
+    tk.Label(remote_frame, text="Domain:").pack(side=tk.LEFT, padx=5)
+    domain_entry = tk.Entry(remote_frame, state=tk.DISABLED)
+    domain_entry.pack(side=tk.LEFT, padx=5)
+
+    tk.Label(remote_frame, text="Username:").pack(side=tk.LEFT, padx=5)
+    username_entry = tk.Entry(remote_frame, state=tk.DISABLED)
+    username_entry.pack(side=tk.LEFT, padx=5)
+
+    tk.Label(remote_frame, text="Password:").pack(side=tk.LEFT, padx=5)
+    password_entry = tk.Entry(remote_frame, show="*", state=tk.DISABLED)
+    password_entry.pack(side=tk.LEFT, padx=5)
+
     border_effects = {"raised": tk.RAISED}
     border_frame = tk.Frame(root, bg="#08646C", padx=1, pady=1, relief=border_effects["raised"])
     border_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
@@ -240,6 +252,24 @@ def on_search():
     global log_name, source_name, event_type, event_category, event_id, max_events, keywords, start_date, end_date, event_levels, remote_machine, selection, output_text
     try:
         server = remote_machine.get() if selection.get() == "remote" and remote_machine.get() else 'localhost'
+        domain = domain_entry.get()
+        username = username_entry.get()
+        password = password_entry.get()
+
+        # Use the credentials to log on
+        if selection.get() == "remote":
+            try:
+                win32security.LogonUser(
+                    username,
+                    domain,
+                    password,
+                    win32security.LOGON32_LOGON_INTERACTIVE,
+                    win32security.LOGON32_PROVIDER_DEFAULT
+                )
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to log on to remote machine: {e}")
+                return
+
 
         # Get the selected date and time
         start_date_value = start_date.get_date().strftime("%Y-%m-%d")
