@@ -9,64 +9,218 @@ from tkinter import scrolledtext
 from tkinter import PhotoImage
 from tkcalendar import DateEntry
 import datetime
+import threading
 
-# Function definitions (get_all_log_names, get_filtered_logs, clear_fields, toggle_remote)
-def get_all_log_names(server):
-    # Retrieves all log names on the specified server
-    all_logs = []
+## Create the definition for Search filters
+def on_search():
+    global log_name, source_name, event_type, event_category, max_events, keywords, start_date, end_date, event_levels, remote_machine, selection, output_text
+
     try:
-        sources = ["Application", "System", "Security"]  # Common event log names
-        for source in sources:
-            hand = win32evtlog.OpenEventLog(server, source)
-            if hand:
-                all_logs.append(source)
-                win32evtlog.CloseEventLog(hand)
+        server = remote_machine.get() if selection.get() == "remote" and remote_machine.get() else 'localhost'
+
+        if selection.get() == "remote":
+            domain = domain_entry.get()
+            username = username_entry.get()
+            password = password_entry.get()
+
+            # Use the credentials to log on
+            try:
+                win32security.LogonUser(
+                    username,
+                    domain,
+                    password,
+                    win32security.LOGON32_LOGON_INTERACTIVE,
+                    win32security.LOGON32_PROVIDER_DEFAULT
+                )
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to log on to remote machine: {e}")
+                return
+
+        # Get the selected date and time
+        start_date_value = start_date.get_date().strftime("%Y-%m-%d")
+        start_hour_value = start_hour.get()
+        start_minute_value = start_minute.get()
+        start_time = f"{start_date_value} {start_hour_value}:{start_minute_value}:00"
+        sd = datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+
+        end_date_value = end_date.get_date().strftime("%Y-%m-%d")
+        end_hour_value = end_hour.get()
+        end_minute_value = end_minute.get()
+        end_time = f"{end_date_value} {end_hour_value}:{end_minute_value}:00"
+        ed = datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+
+        max_events_val = int(max_events.get()) if max_events.get() else None
+        levels = [i for level, var in event_levels if var.get() for i in range(1, 6)]
+
+        logs = get_filtered_logs(server, log_name.get(), event_type.get(), event_category.get(), source_name.get(), keywords.get(), sd, ed, max_events_val, levels)
+
+        output_text.delete(1.0, tk.END)
+        output_text.tag_configure("yellow_bg", background="#C3C30D")
+        output_text.tag_configure("blue_bg", background="#109BAB")
+
+        output_text.insert(tk.END, f"Total records: {len(logs)}\n\n")
+
+        loging_event_ids = {4727, 4728, 4729, 4730, 4720, 4723, 4724, 4725, 4738, 4767, 4722, 4726, 4740, 4781, 4768,
+                            4771, 4820, 4647, 4624, 4625, 4648, 4778, 4779, 4800, 4801, 4802, 4803}
+        application_hanging_event_ids = {1000, 1001, 1002}
+
+        logon_failure_codes = {
+            "0xC0000064": "user name does not exist",
+            "0xC000006A": "user name is correct but the password is wrong",
+            "0xC0000234": "user is currently locked out",
+            "0xC0000072": "account is currently disabled",
+            "0xC000006D": "reason not specified (Sub status may provide more information)",
+            "0xC000006F": "user tried to logon outside his day of week or time of day restrictions",
+            "0xC0000070": "workstation restriction",
+            "0xC0000193": "account expiration",
+            "0xC0000071": "expired password",
+            "0xC0000133": "clocks between DC and other computer too far out of sync",
+            "0xC0000224": "user is required to change password at next logon",
+            "0xC0000225": "evidently a bug in Windows and not a risk"
+        }
+
+        kerberos_failure_codes = {
+            "0x6": "Bad user name",
+            "0x7": "New computer account?",
+            "0x9": "Administrator should reset password",
+            "0xC": "Workstation restriction",
+            "0x12": "Account disabled, expired, locked out, logon hours restriction",
+            "0x17": "The user’s password has expired",
+            "0x18": "Bad password",
+            "0x20": "Frequently logged by computer accounts",
+            "0x25": "Workstation’s clock too far out of sync with the DC’s"
+        }
+
+        for log in logs:
+            log_details = format_log_details(log, logon_failure_codes, kerberos_failure_codes, loging_event_ids, application_hanging_event_ids)
+            output_text.insert(tk.END, log_details + "\n")
+
+            # Apply yellow background to Logged: {log['Time Generated']}
+            start_idx = output_text.search("Logged:", "1.0", tk.END)
+            if start_idx:
+                end_idx = f"{start_idx.split('.')[0]}.end"
+                output_text.tag_add("yellow_bg", start_idx, end_idx)
+
+            # Apply Blue background to divider
+            start_idx = output_text.search("####################################################################################", "1.0", tk.END)
+            if start_idx:
+                end_idx = f"{start_idx.split('.')[0]}.end"
+                output_text.tag_add("blue_bg", start_idx, end_idx)
+
+    except ValueError as e:
+        messagebox.showerror("Error", f"Invalid date format: {e}")
     except Exception as e:
-        print(f"Error fetching log names: {e}")
-    return all_logs
+        messagebox.showerror("Error", f"An error occurred: {e}")
 
-def get_filtered_logs(server, log_name_keywords, event_type, event_category, event_id, source_name, keywords, start_date, end_date, max_events, event_levels):
-    all_logs = get_all_log_names(server)
-    flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-    logs = []
+def format_log_details(log, logon_failure_codes, kerberos_failure_codes, loging_event_ids, application_hanging_event_ids):
+    event_id = log['Event ID']
+    if event_id in loging_event_ids:
+        log_details = f"""
+Logged: {log['Time Generated']}
+    Log Name: {log['Log Name']}
+    Source: {log['Source Name']}
+    Event ID: {log['Event ID']}
+    Task Category: {log.get('Event Category', 'N/A')}
+    Level: {log.get('Event Type', 'N/A')}
+    Keywords: {log.get('Keywords', 'N/A')}
+    User: {log.get('Security UserID', 'N/A')}
+    Computer: {log.get('Source Name', 'N/A')}
+    Description: {log.get('Event Data', 'N/A')}
+    Logon Failure Codes:
+"""
+        for code, description in logon_failure_codes.items():
+            log_details += f"    {code} = {description}\n"
 
-    for log_name in all_logs:
-        try:
-            hand = win32evtlog.OpenEventLog(server, log_name)
-            while True:
-                events = win32evtlog.ReadEventLog(hand, flags, 0)
-                if not events:
-                    break
-                for event in events:
-                    if event.StringInserts:
-                        for string in event.StringInserts:
-                            if any(keyword in string for keyword in log_name_keywords.split(',')) and (start_date <= event.TimeGenerated <= end_date if start_date and end_date else True):
-                                logs.append({
-                                    "Log Name": log_name,
-                                    "Event ID": event.EventID,
-                                    "Time Generated": event.TimeGenerated,
-                                    "Source Name": event.SourceName,
-                                    "Event Type": event.EventType,
-                                    "Event Category": event.EventCategory,
-                                    "Event Data": event.StringInserts
-                                })
-            win32evtlog.CloseEventLog(hand)
-        except Exception as e:
-            print(f"Error processing log {log_name}: {e}")
-            continue
-    return logs
+        log_details += "Kerberos Failure Codes:\n"
+        for code, description in kerberos_failure_codes.items():
+            log_details += f"    {code} = {description}\n"
 
-# Local or Remote selection
-def toggle_remote(state):
-    if state == "remote":
-        remote_machine.config(state=tk.NORMAL)
+        log_details += f"""
+    Logon Info:
+        Logon Type: {log.get('Logon Type', 'N/A')}
+        Logon ID: {log.get('Logon ID', 'N/A')}
+        Logon GUID: {log.get('Logon GUID', 'N/A')}
+        Security ID: {log.get('Security ID', 'N/A')}
+        Account Domain: {log.get('Account Domain', 'N/A')}
+        Account Name: {log.get('Account Name', 'N/A')}
+        Virtual Account: {log.get('Virtual Account', 'N/A')}
+
+    Authentication Info:
+        Virtual Account: {log.get('Virtual Account', 'N/A')}
+        Process ID: {log.get('Process ID', 'N/A')}
+        Logon Process: {log.get('Logon Process', 'N/A')}
+        Workstation Name: {log.get('Workstation Name', 'N/A')}
+        Source Network Address: {log.get('Source Network Address', 'N/A')}
+        Source Port: {log.get('Source Port', 'N/A')}
+####################################################################################
+        """
+    elif event_id in application_hanging_event_ids:
+        log_details = f"""
+Time Generated: {log['Time Generated']}
+    Provider Name: {log.get('Provider Name', 'N/A')}
+    Event ID: {log['Event ID']}
+    Level: {log.get('Event Type', 'N/A')}
+    Keywords: {log.get('Keywords', 'N/A')}
+    Guid: {log.get('Guid', 'N/A')}
+    ResultCode: {log.get('ResultCode', 'N/A')}
+
+    EventData:
+        AppName: {log.get('AppName', 'N/A')}
+        AppVersion: {log.get('AppVersion', 'N/A')}
+        ProcessId: {log.get('Execution ProcessID', 'N/A')}
+        ExeFileName: {log.get('ExeFileName', 'N/A')}
+        HangType: {log.get('HangType', 'N/A')}
+        Component: {log.get('Component', 'N/A')}
+        Operation: {log.get('Operation', 'N/A')}
+        EventName: {log.get('EventName', 'N/A')}
+        Response: {log.get('Response', 'N/A')}
+        Channel: {log.get('Channel', 'N/A')}
+        Computer: {log.get('Source Name', 'N/A')}
+        UserID: {log.get('Security UserID', 'N/A')}
+####################################################################################
+        """
     else:
-        remote_machine.config(state=tk.DISABLED)
+        log_details = f"""
+Time Generated: {log['Time Generated']}
+    Log Name: {log['Log Name']}
+    Event ID: {log['Event ID']}
+    Logon ID: {log.get('Logon ID', 'N/A')}
+    Provider ID: {log.get('Provider ID', 'N/A')}
+    Source Name: {log['Source Name']}
+    Level: {log.get('Event Type', 'N/A')}
+    Event Type: {log['Event Type']}
+    Guid: {log.get('Guid', 'N/A')}
+
+    Event Data:
+        SubjectUserID: {log.get('Subject UserID', 'N/A')}
+        SubjectUserName: {log.get('SubjectUserName', 'N/A')}
+        SubjectDomainName: {log.get('SubjectDomainName', 'N/A')}
+        SubjectGuid: {log.get('SubjectGuid', 'N/A')}
+        SubjectLogonID: {log.get('SubjectLogonID', 'N/A')}
+
+    System:
+        Process ID: {log.get('Process ID', 'N/A')}
+        Account Name: {log.get('Account Name', 'N/A')}
+        Account Domain: {log.get('Account Domain', 'N/A')}
+        Computer: {log.get('Computer', 'N/A')}
+        Security ID: {log.get('Security ID', 'N/A')}
+        Event Category: {log['Event Category']}
+        Provider ID: {log.get('Provider ID', 'N/A')}
+        Operation: {log.get('Operation', 'N/A')}
+        Return Code: {log.get('Return Code', 'N/A')}
+####################################################################################
+        """
+    return log_details
+
+def start_search():
+    search_thread = threading.Thread(target=on_search)
+    search_thread.start()
+
+    # Create the definition for GUI Style and Structure
 
 
-# Create the definition for GUI Style and Structure
 def create_gui():
-    global log_name, source_name, event_type, event_category, event_id, max_events, keywords, start_date, end_date, event_levels, remote_machine, selection, output_text, frame, start_hour, end_hour, start_minute, end_minute
+    global log_name, source_name, event_type, event_category, event_id, max_events, keywords, start_date, end_date, event_levels, remote_machine, selection, output_text, domain_entry, username_entry, password_entry, start_hour, start_minute, end_hour, end_minute
 
     root = tk.Tk()
     root.title("EventLogWizard - Advanced Windows Event Log Viewer")
@@ -77,7 +231,8 @@ def create_gui():
 
     # Menu with About Information
     def show_about():
-        messagebox.showinfo("About EventLogWizard", "EventLogWizard - Advanced Windows Event Log Viewer\nVersion 1.0\nDeveloped by Sandra van Buggenum\nwww.svanbuggenumanalytics.com")
+        messagebox.showinfo("About EventLogWizard",
+                            "EventLogWizard - Advanced Windows Event Log Viewer\nVersion 1.0\nDeveloped by Sandra van Buggenum\nwww.svanbuggenumanalytics.com")
 
     help_menu = tk.Menu(menubar, tearoff=0)
     help_menu.add_command(label="About", command=show_about)
@@ -94,7 +249,8 @@ def create_gui():
     title_label = tk.Label(title_frame, text="EventLogWizard", font=("Verdana", 16, "bold"), bg="#0E97B6")
     title_label.pack(side=tk.TOP, anchor="center")
 
-    icon_image = tk.PhotoImage(file="C:\\Users\\svanb\\OneDrive\\Python\\Automation\\EventLogWizard_logo.png")
+    icon_image = tk.PhotoImage(
+        file="C:\\Users\\svanb\\OneDrive\\Python\\Automation\\event_log_wizard\\EventLogWizard_logo.png")
     icon_image = icon_image.subsample(10, 10)
     root.icon_image = icon_image
 
@@ -107,7 +263,9 @@ def create_gui():
     image_label = tk.Label(border_frame, image=icon_image, bg="#0E97B6")
     image_label.pack()
 
-    info_label = tk.Label(title_frame, text="Advanced Windows Event Log Viewer to monitor and troubleshoot your system logs with ease.\n\n\nBelieve you can and you're halfway there. - 'Theodore Roosevelt'", font=("Verdana", 10), fg="white", wraplength=800, justify="center", bg="#0E97B6", anchor="w")
+    info_label = tk.Label(title_frame,
+                          text="Advanced Windows Event Log Viewer to monitor and troubleshoot your system logs with ease.\n\n\nBelieve you can and you're halfway there. - 'Theodore Roosevelt'",
+                          font=("Verdana", 10), fg="white", wraplength=800, justify="center", bg="#0E97B6", anchor="w")
     info_label.pack(side=tk.TOP, anchor="center")
 
     remote_frame = tk.Frame(root)
@@ -116,9 +274,11 @@ def create_gui():
     # Local or Remote Style
     tk.Label(remote_frame, text="Retrieve logs from:").pack(side=tk.LEFT, padx=5)
     selection = tk.StringVar(value="local")
-    local_rb = tk.Radiobutton(remote_frame, text="Local", variable=selection, value="local", command=lambda: toggle_remote("local"))
+    local_rb = tk.Radiobutton(remote_frame, text="Local", variable=selection, value="local",
+                              command=lambda: toggle_remote("local"))
     local_rb.pack(side=tk.LEFT, padx=5)
-    remote_rb = tk.Radiobutton(remote_frame, text="Remote", variable=selection, value="remote", command=lambda: toggle_remote("remote"))
+    remote_rb = tk.Radiobutton(remote_frame, text="Remote", variable=selection, value="remote",
+                               command=lambda: toggle_remote("remote"))
     remote_rb.pack(side=tk.LEFT, padx=5)
 
     remote_machine = tk.Entry(remote_frame, state=tk.DISABLED)
@@ -196,7 +356,8 @@ def create_gui():
 
     tk.Label(frame, text="Event Levels:").grid(row=9, column=0, sticky=tk.W)
     event_levels = []
-    for i, level in enumerate(["Critical", "Error", "Warning", "Information", "Verbose", "Audit Success", "Audit Failure"]):
+    for i, level in enumerate(
+            ["Critical", "Error", "Warning", "Information", "Verbose", "Audit Success", "Audit Failure"]):
         var = tk.IntVar()
         cb = tk.Checkbutton(frame, text=level, variable=var, width=26)
         cb.grid(row=9, column=i + 1, pady=2, sticky=tk.W)
@@ -212,13 +373,66 @@ def create_gui():
     frame.rowconfigure(14, weight=1)
 
     # Buttons
-    search_button = ttk.Button(frame, text="Search", style='TButton', command=on_search, width=10)
+    search_button = ttk.Button(frame, text="Search", style='TButton', command=start_search, width=10)
     search_button.grid(row=13, column=1, pady=5, sticky="ew", padx=5)
 
     clear_button = ttk.Button(frame, text="Clear", style='TButton', command=clear_fields, width=10)
     clear_button.grid(row=13, column=2, pady=5, sticky="ew", padx=5)
 
     root.mainloop()
+
+# Function definitions (get_all_log_names, get_filtered_logs, clear_fields, toggle_remote)
+def get_all_log_names(server):
+    # Retrieves all log names on the specified server
+    all_logs = []
+    try:
+        sources = ["Application", "System", "Security"]  # Common event log names
+        for source in sources:
+            hand = win32evtlog.OpenEventLog(server, source)
+            if hand:
+                all_logs.append(source)
+                win32evtlog.CloseEventLog(hand)
+    except pywintypes.error as e:
+        print(f"Error fetching log names: {e}")
+    return all_logs
+
+def get_filtered_logs(server, log_name_keywords, event_type, event_category, source_name, keywords, start_date, end_date, max_events, event_levels):
+    all_logs = get_all_log_names(server)
+    flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
+    logs = []
+
+    for log_name in all_logs:
+        try:
+            hand = win32evtlog.OpenEventLog(server, log_name)
+            while True:
+                events = win32evtlog.ReadEventLog(hand, flags, 0)
+                if not events:
+                    break
+                for event in events:
+                    if event.StringInserts:
+                        for string in event.StringInserts:
+                            if any(keyword in string for keyword in log_name_keywords.split(',')) and (start_date <= event.TimeGenerated <= end_date if start_date and end_date else True):
+                                logs.append({
+                                    "Log Name": log_name,
+                                    "Event ID": event.EventID,
+                                    "Time Generated": event.TimeGenerated,
+                                    "Source Name": event.SourceName,
+                                    "Event Type": event.EventType,
+                                    "Event Category": event.EventCategory,
+                                    "Event Data": event.StringInserts
+                                })
+            win32evtlog.CloseEventLog(hand)
+        except Exception as e:
+            print(f"Error processing log {log_name}: {e}")
+            continue
+    return logs
+
+# Local or Remote selection
+def toggle_remote(state):
+    if state == "remote":
+        remote_machine.config(state=tk.NORMAL)
+    else:
+        remote_machine.config(state=tk.DISABLED)
 
 
 def clear_fields():
@@ -247,203 +461,6 @@ def clear_fields():
     # Clear ScrolledText
     output_text.delete(1.0, tk.END)
 
-## Create the definition for Search filters
-def on_search():
-    global log_name, source_name, event_type, event_category, event_id, max_events, keywords, start_date, end_date, event_levels, remote_machine, selection, output_text
-    try:
-        server = remote_machine.get() if selection.get() == "remote" and remote_machine.get() else 'localhost'
-        domain = domain_entry.get()
-        username = username_entry.get()
-        password = password_entry.get()
-
-        # Use the credentials to log on
-        if selection.get() == "remote":
-            try:
-                win32security.LogonUser(
-                    username,
-                    domain,
-                    password,
-                    win32security.LOGON32_LOGON_INTERACTIVE,
-                    win32security.LOGON32_PROVIDER_DEFAULT
-                )
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to log on to remote machine: {e}")
-                return
-
-
-        # Get the selected date and time
-        start_date_value = start_date.get_date().strftime("%Y-%m-%d")
-        start_hour_value = start_hour.get()
-        start_minute_value = start_minute.get()
-        start_time = f"{start_date_value} {start_hour_value}:{start_minute_value}:00"
-        sd = datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-
-        end_date_value = end_date.get_date().strftime("%Y-%m-%d")
-        end_hour_value = end_hour.get()
-        end_minute_value = end_minute.get()
-        end_time = f"{end_date_value} {end_hour_value}:{end_minute_value}:00"
-        ed = datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
-
-        max_events_val = int(max_events.get()) if max_events.get() else None
-        levels = [i for level, var in event_levels if var.get() for i in range(1, 6)]
-
-        logs = get_filtered_logs(server, log_name.get(), event_type.get(), event_category.get(), event_id.get(),
-                                 source_name.get(), keywords.get(), sd, ed, max_events_val, levels)
-
-        output_text.delete(1.0, tk.END)
-        output_text.tag_configure("yellow_bg", background="#C3C30D")
-
-        output_text.delete(1.0, tk.END)
-        output_text.tag_configure("blue_bg", background="#109BAB")
-
-        output_text.delete(1.0, tk.END)
-        output_text.insert(tk.END, f"Total records: {len(logs)}\n\n")
-
-        loging_event_ids = {4727, 4728, 4729, 4730, 4720, 4723, 4724, 4725, 4738, 4767, 4722, 4726, 4740, 4781, 4768,
-                             4771, 4820, 4647, 4624, 4625, 4648, 4778, 4779, 4800, 4801, 4802, 4803}
-        application_hanging_event_ids = {1000, 1001, 1002}
-
-        logon_failure_codes = {
-            "0xC0000064": "user name does not exist",
-            "0xC000006A": "user name is correct but the password is wrong",
-            "0xC0000234": "user is currently locked out",
-            "0xC0000072": "account is currently disabled",
-            "0xC000006D": "reason not specified (Sub status may provide more information)",
-            "0xC000006F": "user tried to logon outside his day of week or time of day restrictions",
-            "0xC0000070": "workstation restriction",
-            "0xC0000193": "account expiration",
-            "0xC0000071": "expired password",
-            "0xC0000133": "clocks between DC and other computer too far out of sync",
-            "0xC0000224": "user is required to change password at next logon",
-            "0xC0000225": "evidently a bug in Windows and not a risk"
-        }
-
-        kerberos_failure_codes = {
-            "0x6": "Bad user name",
-            "0x7": "New computer account?",
-            "0x9": "Administrator should reset password",
-            "0xC": "Workstation restriction",
-            "0x12": "Account disabled, expired, locked out, logon hours restriction",
-            "0x17": "The user’s password has expired",
-            "0x18": "Bad password",
-            "0x20": "Frequently logged by computer accounts",
-            "0x25": "Workstation’s clock too far out of sync with the DC’s"
-        }
-
-        for log in logs:
-            event_id = log['Event ID']
-            if event_id in loging_event_ids:
-                log_details = f"""
-Logged: {log['Time Generated']}
-    Log Name: {log['Log Name']}
-    Source: {log['Source Name']}
-    Event ID: {log['Event ID']}
-    Task Category: {log.get('Event Category', 'N/A')}
-    Level: {log.get('Event Type', 'N/A')}
-    Keywords: {log.get('Keywords', 'N/A')}
-    User: {log.get('Security UserID', 'N/A')}
-    Computer: {log.get('Source Name', 'N/A')}
-    Description: {log.get('Event Data', 'N/A')}
-    Logon Failure Codes:
-"""
-                for code, description in logon_failure_codes.items():
-                    log_details += f"    {code} = {description}\n"
-
-                log_details += "Kerberos Failure Codes:\n"
-                for code, description in kerberos_failure_codes.items():
-                    log_details += f"    {code} = {description}\n"
-
-                log_details += f"""
-    Logon Info:
-        Logon Type: {log.get('Logon Type', 'N/A')}
-        Logon ID: {log.get('Logon ID', 'N/A')}
-        Logon GUID: {log.get('Logon GUID', 'N/A')}
-        Security ID: {log.get('Security ID', 'N/A')}
-        Account Domain: {log.get('Account Domain', 'N/A')}
-        Account Name: {log.get('Account Name', 'N/A')}
-        Virtual Account: {log.get('Virtual Account', 'N/A')}
-
-    Authentication Info:
-        Virtual Account: {log.get('Virtual Account', 'N/A')}
-        Process ID: {log.get('Process ID', 'N/A')}
-        Logon Process: {log.get('Logon Process', 'N/A')}
-        Workstation Name: {log.get('Workstation Name', 'N/A')}
-        Source Network Address: {log.get('Source Network Address', 'N/A')}
-        Source Port: {log.get('Source Port', 'N/A')}
-####################################################################################
-                """
-            elif event_id in application_hanging_event_ids:
-                log_details = f"""
-Time Generated: {log['Time Generated']}
-    Provider Name: {log.get('Provider Name', 'N/A')}
-    Event ID: {log['Event ID']}
-    Level: {log.get('Event Type', 'N/A')}
-    Keywords: {log.get('Keywords', 'N/A')}
-    Guid: {log.get('Guid', 'N/A')}
-    ResultCode: {log.get('ResultCode', 'N/A')}
-    
-    EventData:
-        AppName: {log.get('AppName', 'N/A')}
-        AppVersion: {log.get('AppVersion', 'N/A')}
-        ProcessId: {log.get('Execution ProcessID', 'N/A')}
-        ExeFileName: {log.get('ExeFileName', 'N/A')}
-        HangType: {log.get('HangType', 'N/A')}
-        Component: {log.get('Component', 'N/A')}
-        Operation: {log.get('Operation', 'N/A')}
-        EventName: {log.get('EventName', 'N/A')}
-        Response: {log.get('Response', 'N/A')}
-        Channel: {log.get('Channel', 'N/A')}
-        Computer: {log.get('Source Name', 'N/A')}
-        UserID: {log.get('Security UserID', 'N/A')}
-####################################################################################
-                """
-            else:
-                log_details = f"""
-Time Generated: {log['Time Generated']}
-    Log Name: {log['Log Name']}
-    Event ID: {log['Event ID']}
-    Logon ID: {log.get('Logon ID', 'N/A')}
-    Provider ID: {log.get('Provider ID', 'N/A')}
-    Source Name: {log['Source Name']}
-    Level: {log.get('Event Type', 'N/A')}
-    Event Type: {log['Event Type']}
-    Guid: {log.get('Guid', 'N/A')}
-
-    Event Data:
-        SubjectUserID: {log.get('Subject UserID', 'N/A')}
-        SubjectUserName: {log.get('SubjectUserName', 'N/A')}
-        SubjectDomainName: {log.get('SubjectDomainName', 'N/A')}
-        SubjectGuid: {log.get('SubjectGuid', 'N/A')}
-        SubjectLogonID: {log.get('SubjectLogonID', 'N/A')}
-
-    System:
-        Process ID: {log.get('Process ID', 'N/A')}
-        Account Name: {log.get('Account Name', 'N/A')}
-        Account Domain: {log.get('Account Domain', 'N/A')}
-        Computer: {log.get('Computer', 'N/A')}
-        Security ID: {log.get('Security ID', 'N/A')}
-        Event Category: {log['Event Category']}
-        Provider ID: {log.get('Provider ID', 'N/A')}
-        Operation: {log.get('Operation', 'N/A')}
-        Return Code: {log.get('Return Code', 'N/A')}
-####################################################################################
-                """
-            output_text.insert(tk.END, log_details + "\n")
-
-           # Apply yellow background to Logged: {log['Time Generated']}
-            start_idx = output_text.search("Logged:", "1.0", tk.END)
-            if start_idx:
-                end_idx = f"{start_idx.split('.')[0]}.end"
-                output_text.tag_add("yellow_bg", start_idx, end_idx)
-
-            # Apply Blue background to divider
-            start_idx = output_text.search("####################################################################################", "1.0", tk.END)
-            if start_idx:
-                end_idx = f"{start_idx.split('.')[0]}.end"
-                output_text.tag_add("blue_bg", start_idx, end_idx)
-
-    except ValueError as e:
-        messagebox.showerror("Error", f"Invalid date format: {e}")
 
 if __name__ == "__main__":
     create_gui()
